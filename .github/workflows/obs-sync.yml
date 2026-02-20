@@ -1,0 +1,106 @@
+name: Sync upstream PlasmaZones releases to OBS
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # controlla una volta al giorno alle 02:00 UTC
+  workflow_dispatch:     # permette trigger manuale
+
+env:
+  UPSTREAM_REPO: fuddlesworth/PlasmaZones
+  OBS_PROJECT: home:ilFrance
+  OBS_PACKAGE: plasmazones
+  OBS_REPO: openSUSE_Tumbleweed
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl osc
+
+      - name: Get latest upstream tag
+        id: get_tag
+        run: |
+          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" | jq -r '.[0].name')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "No tag found; failing"
+            exit 1
+          fi
+          echo "Tag found: $TAG"
+          VERSION="${TAG#v}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+
+      - name: Configure osc (oscrc)
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          if [ -z "${OBS_USER}" ] || [ -z "${OBS_TOKEN}" ]; then
+            echo "OBS secrets not set"; exit 1
+          fi
+          mkdir -p $HOME/.config/osc
+          cat > $HOME/.config/osc/oscrc <<EOF
+[general]
+apiurl = https://api.opensuse.org
+
+[https://api.opensuse.org]
+user = ${OBS_USER}
+pass = ${OBS_TOKEN}
+EOF
+          chmod 600 $HOME/.config/osc/oscrc
+          osc --version
+
+      - name: Checkout OBS package
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+        run: |
+          rm -rf ${OBS_PACKAGE} || true
+          osc checkout ${OBS_PROJECT}/${OBS_PACKAGE}
+          ls -la ${OBS_PACKAGE}
+
+      - name: Read current version from spec
+        run: |
+          cd ${OBS_PACKAGE}
+          CUR=$(grep '^Version:' ${OBS_PACKAGE}.spec | awk '{print $2}')
+          echo "CURRENT_VERSION=${CUR}" >> $GITHUB_ENV
+          echo "OBS_SPEC_PATH=$(pwd)/${OBS_PACKAGE}.spec" >> $GITHUB_ENV
+
+      - name: Compare versions and update OBS if needed
+        env:
+          VERSION: ${{ env.VERSION }}
+          TAG: ${{ env.TAG }}
+        run: |
+          cd ${OBS_PACKAGE}
+          echo "Upstream version: ${VERSION}"
+          echo "Current OBS version: ${CURRENT_VERSION}"
+          if [ "${VERSION}" = "${CURRENT_VERSION}" ]; then
+            echo "No update needed; exiting."
+            exit 0
+          fi
+
+          # Update version and release in spec
+          sed -i "s/^Version:.*/Version:        ${VERSION}/" ${OBS_PACKAGE}.spec
+          sed -i "s/^Release:.*/Release:        0/" ${OBS_PACKAGE}.spec
+
+          # Create/update _service to fetch tag tarball
+          cat > _service <<EOF
+<services>
+  <service name="download_url">
+    <param name="url">https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz</param>
+  </service>
+</services>
+EOF
+
+          osc add _service || true
+          osc add ${OBS_PACKAGE}.spec || true
+          osc commit -m "automated: update to ${VERSION}" || echo "No changes to commit"
+
+      - name: Notify
+        run: |
+          echo "Workflow finished. If changes were committed, OBS will start a build."
