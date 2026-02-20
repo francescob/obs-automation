@@ -15,210 +15,78 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
-
-      - name: Install tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          # installa strumenti di base
-          sudo apt-get install -y jq curl ca-certificates git python3-pip
-
-          # prova ad installare osc da apt; se non disponibile, installa via pip --user
-          if ! sudo apt-get install -y osc >/dev/null 2>&1; then
-            python3 -m pip install --user osc
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-
-          # installa yq (mikefarah) in /usr/local/bin per robustezza
-          if ! command -v yq >/dev/null 2>&1; then
-            YQ_BIN="/usr/local/bin/yq"
-            sudo curl -sL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -o "$YQ_BIN"
-            sudo chmod +x "$YQ_BIN"
-          fi
-
-      - name: Get latest upstream tag and download tarball
+      - name: Get latest upstream tag
         id: get_tag
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           # preferisci la release "latest" se esiste
-          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | jq -r '.tag_name // empty') || true
+          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
+            | jq -r '.tag_name // empty') || true
           if [ -z "${TAG}" ]; then
-            TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" | jq -r '.[0].name')
+            TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" \
+              | jq -r '.[0].name')
           fi
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "No tag found; failing"
+            echo "No upstream tag found; nothing to do."
+            exit 0
+          fi
+          echo "Upstream tag: $TAG"
+          VERSION="${TAG#v}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Trigger OBS source service run
+        shell: bash
+        env:
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_TOKEN:-}" ]; then
+            echo "OBS_TOKEN not set; cannot trigger service run"
             exit 1
           fi
-          echo "Tag found: $TAG"
-          VERSION="${TAG#v}"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "TAG=${TAG}" >> $GITHUB_ENV
-
-          # Scarica tarball del tag (usa GH_TOKEN se fornito)
-          TAR_URL="https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz"
-          echo "Downloading ${TAR_URL}"
-          if [ -n "${GH_TOKEN:-}" ]; then
-            curl -H "Authorization: token ${GH_TOKEN}" -L --fail -o source.tar.gz "${TAR_URL}"
-          else
-            curl -L --fail -o source.tar.gz "${TAR_URL}"
+          echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
+          HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
+            -H "Authorization: Token ${OBS_TOKEN}" \
+            -X POST \
+            "https://api.opensuse.org/trigger/runservice?project=${OBS_PROJECT}&package=${OBS_PACKAGE}")
+          echo "OBS response (HTTP ${HTTP_STATUS}):"
+          cat /tmp/obs_resp.txt
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "ERROR: OBS service trigger failed with HTTP ${HTTP_STATUS}"
+            exit 1
           fi
-          sha256sum source.tar.gz | awk '{print $1}' > source.tar.gz.sha256
-          echo "TARBALL_SHA256=$(cat source.tar.gz.sha256)" >> $GITHUB_ENV
+          echo "OBS service run triggered successfully."
 
-      - name: Configure osc (oscrc)
+      - name: Wait for OBS build result
+        continue-on-error: true
         shell: bash
         env:
           OBS_USER: ${{ secrets.OBS_USER }}
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${OBS_USER:-}" ] || [ -z "${OBS_TOKEN:-}" ]; then
-            echo "OBS secrets not set"
-            exit 1
-          fi
-          mkdir -p "$HOME/.config/osc"
-          {
-            echo '[general]'
-            echo 'apiurl = https://api.opensuse.org'
-            echo ''
-            echo '[https://api.opensuse.org]'
-            echo "user = ${OBS_USER}"
-            echo "pass = ${OBS_TOKEN}"
-          } > "$HOME/.config/osc/oscrc"
-
-      - name: Checkout OBS package
-        shell: bash
-        run: |
-          set -euo pipefail
-          osc checkout "${OBS_PROJECT}/${OBS_PACKAGE}" "${OBS_REPO}"
-
-      - name: Update package and commit to OBS
-        shell: bash
-        env:
-          TAG: ${{ env.TAG }}
-          VERSION: ${{ env.VERSION }}
-          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
-          OBS_PACKAGE: ${{ env.OBS_PACKAGE }}
-          OBS_REPO: ${{ env.OBS_REPO }}
-        run: |
-          set -euo pipefail
-          PKG_DIR="${OBS_PACKAGE}"
-          if [ ! -d "$PKG_DIR" ]; then
-            echo "Checkout dir $PKG_DIR not found"; ls -la; exit 1
-          fi
-          cd "$PKG_DIR"
-
-          # Se esiste _service, leggi il tag corrente in modo robusto e confronta
-          if [ -f "_service" ]; then
-            echo "_service found; checking current tag"
-            # prova a leggere con yq; fallback a grep
-            CURRENT_TAG=""
-            if command -v yq >/dev/null 2>&1; then
-              CURRENT_TAG=$(yq e '.source.tag // .tag // empty' _service || true)
-            fi
-            if [ -z "$CURRENT_TAG" ]; then
-              CURRENT_TAG=$(grep -Eo '^[[:space:]]*tag:[[:space:]]*.*$' _service | head -n1 | awk -F ':' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}' || true)
-            fi
-            echo "Current _service tag: ${CURRENT_TAG:-<none>}"
-            if [ "$CURRENT_TAG" = "$TAG" ]; then
-              echo "OBS already at $TAG; nothing to do."; exit 0
-            fi
-
-            # Aggiorna il tag in _service con yq (piu sicuro)
-            if command -v yq >/dev/null 2>&1; then
-              yq e ".source.tag = env(TAG)" -i _service
-            else
-              sed -E -i "s/^[[:space:]]*tag:.*$/tag: ${TAG}/" _service || true
-            fi
-
-            osc add _service
-            osc commit -m "Update _service -> ${TAG}"
-            echo "Committed _service update; OBS will start a build."
-
-            # attendi risultati
-            for i in {1..30}; do
-              sleep 10
-              RESULTS=$(osc results . 2>/dev/null || true)
-              if [ -n "$RESULTS" ]; then
-                echo "$RESULTS"
-                if echo "$RESULTS" | grep -iq 'failed'; then
-                  echo "Build failed"; exit 1
-                fi
-                if echo "$RESULTS" | grep -iq 'succeeded'; then
-                  echo "Build succeeded"; exit 0
-                fi
-              fi
-            done
-            echo "No build results after polling"; exit 1
-          fi
-
-          # Altrimenti aggiorna il .spec
-          SPEC_FILE=$(ls *.spec 2>/dev/null | head -n1 || true)
-          if [ -z "$SPEC_FILE" ]; then
-            echo "No _service and no .spec file found in package; cannot update automatically"
-            exit 1
-          fi
-
-          echo "Found spec: $SPEC_FILE"
-          # leggi Name dal spec per generare nome tarball coerente
-          NAME=$(grep -E '^Name:' "$SPEC_FILE" | awk '{print $2}' || true)
-          if [ -z "$NAME" ]; then
-            NAME="${OBS_PACKAGE}"
-          fi
-
-          # Controlla la Version corrente
-          CURRENT_VER=$(grep -E '^Version:' "$SPEC_FILE" | awk '{print $2}' || true)
-          echo "Current spec Version: ${CURRENT_VER:-<none>}"
-          if [ "$CURRENT_VER" = "$VERSION" ]; then
-            echo "SPEC already at version $VERSION; nothing to do."; exit 0
-          fi
-
-          # Aggiorna Version
-          if grep -qE '^Version:' "$SPEC_FILE"; then
-            sed -E -i "s/^Version:.*/Version: ${VERSION}/" "$SPEC_FILE"
-          else
-            # inserisci Version dopo Name
-            awk -v ver="$VERSION" 'BEGIN{added=0} {print; if(!added && $1=="Name:") {print "Version: " ver; added=1}}' "$SPEC_FILE" > /tmp/spec.tmp && mv /tmp/spec.tmp "$SPEC_FILE"
-          fi
-
-          # Aggiorna Source0
-          TAR_URL="https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz"
-          if grep -qE '^Source0:' "$SPEC_FILE"; then
-            sed -E -i "s|^Source0:.*|Source0: ${TAR_URL}|" "$SPEC_FILE"
-          else
-            # aggiungi Source0 alla fine del file
-            echo "Source0: ${TAR_URL}" >> "$SPEC_FILE"
-          fi
-
-          # Rinomina il tarball in NAME-VERSION.tar.gz
-          TARGET_TAR="${NAME}-${VERSION}.tar.gz"
-          mv ../source.tar.gz "${TARGET_TAR}"
-          mv ../source.tar.gz.sha256 "${TARGET_TAR}.sha256" || true
-
-          osc add "${TARGET_TAR}"
-          osc add "${TARGET_TAR}.sha256" || true
-          osc add "$SPEC_FILE"
-
-          osc commit -m "Update to ${TAG} (version ${VERSION})"
-          echo "Committed package update to OBS. Waiting for build results..."
-
-          for i in {1..30}; do
+          echo "Polling OBS build results for ${OBS_PROJECT}/${OBS_PACKAGE}..."
+          for i in $(seq 1 30); do
             sleep 10
-            RESULTS=$(osc results . 2>/dev/null || true)
+            RESULTS=$(curl -s \
+              -u "${OBS_USER}:${OBS_TOKEN}" \
+              "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
+              2>/dev/null || true)
             if [ -n "$RESULTS" ]; then
-              echo "$RESULTS"
-              if echo "$RESULTS" | grep -iq 'failed'; then
-                echo "Build failed"; exit 1
+              echo "Poll $i: $RESULTS"
+              if echo "$RESULTS" | grep -qi 'state="failed"'; then
+                echo "Build FAILED"
+                exit 1
               fi
-              if echo "$RESULTS" | grep -iq 'succeeded'; then
-                echo "Build succeeded"; exit 0
+              if echo "$RESULTS" | grep -qi 'state="succeeded"'; then
+                echo "Build SUCCEEDED"
+                exit 0
               fi
+            else
+              echo "Poll $i: no response yet"
             fi
           done
-          echo "No build results after polling"; exit 1
+          echo "Build monitoring timed out; check OBS manually."
+          exit 1
