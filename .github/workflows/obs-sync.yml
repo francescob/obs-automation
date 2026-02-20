@@ -83,14 +83,14 @@ jobs:
             exit 1
           fi
           mkdir -p "$HOME/.config/osc"
-          cat > "$HOME/.config/osc/oscrc" <<EOF
-[general]
-apiurl = https://api.opensuse.org
-
-[https://api.opensuse.org]
-user = ${OBS_USER}
-pass = ${OBS_TOKEN}
-EOF
+          {
+            echo '[general]'
+            echo 'apiurl = https://api.opensuse.org'
+            echo ''
+            echo '[https://api.opensuse.org]'
+            echo "user = ${OBS_USER}"
+            echo "pass = ${OBS_TOKEN}"
+          } > "$HOME/.config/osc/oscrc"
 
       - name: Checkout OBS package
         shell: bash
