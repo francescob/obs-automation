@@ -19,18 +19,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install tools
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           # prova ad installare osc da apt; se fallisce, usa pip user install
-          if ! sudo apt-get install -y osc jq curl; then
-            sudo apt-get install -y python3-pip git jq curl
+          if sudo apt-get install -y osc jq curl ca-certificates; then
+            echo "Installed osc from apt"
+          else
+            sudo apt-get install -y python3-pip git jq curl ca-certificates
             python3 -m pip install --user osc
-            export PATH="$HOME/.local/bin:$PATH"
+            # Rendi disponibile osc anche negli step successivi
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Get latest upstream tag
+      - name: Get latest upstream tag and download tarball
         id: get_tag
+        shell: bash
         run: |
+          set -euo pipefail
           TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" | jq -r '.[0].name')
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "No tag found; failing"
@@ -41,19 +48,102 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "TAG=${TAG}" >> $GITHUB_ENV
 
+          # Scarica tarball del tag
+          TAR_URL="https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Downloading ${TAR_URL}"
+          curl -L --fail -o source.tar.gz "${TAR_URL}"
+          sha256sum source.tar.gz | awk '{print $1}' > source.tar.gz.sha256
+          echo "TARBALL_SHA256=$(cat source.tar.gz.sha256)" >> $GITHUB_ENV
+
       - name: Configure osc (oscrc)
+        shell: bash
         env:
           OBS_USER: ${{ secrets.OBS_USER }}
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
+          set -euo pipefail
           if [ -z "${OBS_USER}" ] || [ -z "${OBS_TOKEN}" ]; then
-            echo "OBS secrets not set"; exit 1
+            echo "OBS secrets not set"
+            exit 1
           fi
-          mkdir -p $HOME/.config/osc
-          cat > $HOME/.config/osc/oscrc <<EOF
-[general]
-apiurl = https://api.opensuse.org
+          mkdir -p "$HOME/.config/osc"
+          printf '[general]\napiurl = https://api.opensuse.org\n\n[https://api.opensuse.org]\nuser = %s\npass = %s\n' \
+            "${OBS_USER}" "${OBS_TOKEN}" > "$HOME/.config/osc/oscrc"
 
-[https://api.opensuse.org]
-user = ${OBS_USER}
-pass = ${OBS_TOKEN}
+      - name: Checkout OBS package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # checkout crea una directory con il nome del package
+          osc checkout "${OBS_PROJECT}/${OBS_PACKAGE}" "${OBS_REPO}"
+
+      - name: Update package and commit to OBS
+        shell: bash
+        env:
+          TAG: ${{ env.TAG }}
+          VERSION: ${{ env.VERSION }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          OBS_PACKAGE: ${{ env.OBS_PACKAGE }}
+          OBS_REPO: ${{ env.OBS_REPO }}
+        run: |
+          set -euo pipefail
+          PKG_DIR="${OBS_PACKAGE}"
+          if [ ! -d "$PKG_DIR" ]; then
+            echo "Checkout dir $PKG_DIR not found"; ls -la; exit 1
+          fi
+          cd "$PKG_DIR"
+
+          # Se esiste un file _service, aggiorniamo il tag lì
+          if [ -f "_service" ]; then
+            echo "_service found, updating tag/version in _service"
+            # Proviamo a sostituire linee come: tag: v1.2.3 oppure tag: 1.2.3
+            if grep -qE '^[[:space:]]*tag:' _service; then
+              sed -E -i "s/^[[:space:]]*tag:.*$/tag: ${TAG}/" _service
+            else
+              # fallback: proviamo a sostituire eventuali riferimenti al tag nel file
+              sed -E -i "s/([\"']?)${TAG%.*}[\"']?/${TAG}/g" _service || true
+            fi
+            osc add _service || true
+            osc commit -m "Update _service -> ${TAG}" || true
+            echo "Committed _service update; OBS should start a build."
+            exit 0
+          fi
+
+          # Altrimenti cerchiamo uno spec per aggiornare Version e Source0 e aggiungere il tarball
+          SPEC_FILE=$(ls *.spec 2>/dev/null | head -n1 || true)
+          if [ -z "$SPEC_FILE" ]; then
+            echo "No _service and no .spec file found in package; cannot update automatically"
+            exit 1
+          fi
+
+          echo "Updating spec file: $SPEC_FILE"
+          # Aggiorna Version:
+          if grep -qE '^Version:' "$SPEC_FILE"; then
+            sed -E -i "s/^Version:.*/Version: ${VERSION}/" "$SPEC_FILE"
+          else
+            echo "Version: ${VERSION}" >> "$SPEC_FILE"
+          fi
+
+          # Imposta Source0 su URL tarball GitHub del tag (sovrascrive se presente)
+          TAR_URL="https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz"
+          if grep -qE '^Source0:' "$SPEC_FILE"; then
+            sed -E -i "s|^Source0:.*|Source0: ${TAR_URL}|" "$SPEC_FILE"
+          else
+            echo "Source0: ${TAR_URL}" >> "$SPEC_FILE"
+          fi
+
+          # Sposta il tarball scaricato nella directory del package con nome coerente (facoltativo)
+          # Nome file scelto: ${OBS_PACKAGE}-${VERSION}.tar.gz
+          TARGET_TAR="${OBS_PACKAGE}-${VERSION}.tar.gz"
+          mv ../source.tar.gz "$TARGET_TAR"
+          mv ../source.tar.gz.sha256 "${TARGET_TAR}.sha256" || true
+
+          # Aggiungi/aggiorna file in OBS
+          osc add "$TARGET_TAR" || true
+          osc add "${TARGET_TAR}.sha256" || true
+          osc add "$SPEC_FILE" || true
+
+          # Commit su OBS
+          osc commit -m "Update to ${TAG} (version ${VERSION})" || true
+
+          echo "Committed package update to OBS. OBS should start a build for ${OBS_PACKAGE} in ${OBS_REPO}."
