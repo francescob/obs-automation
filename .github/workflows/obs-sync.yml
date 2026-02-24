@@ -1,9 +1,11 @@
 name: Sync upstream PlasmaZones releases to OBS
 
 on:
+  release:
+    types: [published]
   schedule:
-    - cron: '0 2 * * *'  # controlla una volta al giorno alle 02:00 UTC
-  workflow_dispatch:     # permette trigger manuale
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 env:
   UPSTREAM_REPO: fuddlesworth/PlasmaZones
@@ -15,26 +17,87 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Get latest upstream tag
-        id: get_tag
+      - name: Install tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq osc
+
+      - name: Determine TAG / VERSION
+        id: tag
         shell: bash
         run: |
           set -euo pipefail
-          # preferisci la release "latest" se esiste
-          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
-            | jq -r '.tag_name // empty') || true
-          if [ -z "${TAG}" ]; then
-            TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" \
-              | jq -r '.[0].name')
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | jq -r '.tag_name // empty') || true
+            if [ -z "$TAG" ]; then
+              TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" | jq -r '.[0].name')
+            fi
           fi
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "No upstream tag found; nothing to do."
             exit 0
           fi
-          echo "Upstream tag: $TAG"
           VERSION="${TAG#v}"
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "Upstream tag: $TAG"
+
+      - name: Check OBS secrets
+        shell: bash
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_USER}" ] || [ -z "${OBS_TOKEN}" ]; then
+            echo "ERROR: OBS_USER or OBS_TOKEN secret missing"
+            exit 1
+          fi
+
+      - name: Configure osc credentials
+        shell: bash
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          cat > "$HOME/.oscrc" << EOF
+          [general]
+          apiurl = https://api.opensuse.org
+
+          [https://api.opensuse.org]
+          user = ${OBS_USER}
+          pass = ${OBS_TOKEN}
+          EOF
+          chmod 600 "$HOME/.oscrc"
+
+      - name: Checkout OBS package
+        shell: bash
+        run: |
+          set -euo pipefail
+          osc co "${OBS_PROJECT}" "${OBS_PACKAGE}"
+
+      - name: Update _service file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "${OBS_PROJECT}/${OBS_PACKAGE}/_service" << EOF
+          <services>
+            <service name="download_files">
+              <param name="url">https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz</param>
+              <param name="filename">${OBS_PACKAGE}-${VERSION}.tar.gz</param>
+            </service>
+          </services>
+          EOF
+
+      - name: Commit _service to OBS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${OBS_PROJECT}/${OBS_PACKAGE}"
+          osc add _service || true
+          osc commit -m "ci: update _service to upstream ${TAG}"
 
       - name: Trigger OBS source service run
         shell: bash
@@ -42,10 +105,6 @@ jobs:
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${OBS_TOKEN:-}" ]; then
-            echo "OBS_TOKEN not set; cannot trigger service run"
-            exit 1
-          fi
           echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
           HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
             -H "Authorization: Token ${OBS_TOKEN}" \
@@ -60,7 +119,6 @@ jobs:
           echo "OBS service run triggered successfully."
 
       - name: Wait for OBS build result
-        continue-on-error: true
         shell: bash
         env:
           OBS_USER: ${{ secrets.OBS_USER }}
