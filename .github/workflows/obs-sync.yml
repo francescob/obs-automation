@@ -1,9 +1,11 @@
 name: Sync upstream PlasmaZones releases to OBS
 
 on:
+  release:
+    types: [published]
   schedule:
-    - cron: '0 2 * * *'  # controlla una volta al giorno alle 02:00 UTC
-  workflow_dispatch:     # permette trigger manuale
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 env:
   UPSTREAM_REPO: fuddlesworth/PlasmaZones
@@ -15,26 +17,110 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Get latest upstream tag
-        id: get_tag
+      - name: Validate secrets
         shell: bash
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
           set -euo pipefail
-          # preferisci la release "latest" se esiste
-          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
-            | jq -r '.tag_name // empty') || true
-          if [ -z "${TAG}" ]; then
-            TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/tags" \
-              | jq -r '.[0].name')
+          if [ -z "${OBS_USER:-}" ]; then
+            echo "ERROR: OBS_USER secret is not set."
+            exit 1
           fi
-          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+          if [ -z "${OBS_TOKEN:-}" ]; then
+            echo "ERROR: OBS_TOKEN secret is not set."
+            exit 1
+          fi
+          echo "Secrets validated."
+
+      - name: Determine upstream tag
+        id: get_tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-}"
+          if [ -z "${TAG}" ]; then
+            TAG=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
+              | jq -r '.tag_name // empty') || true
+          fi
+          if [ -z "${TAG}" ]; then
+            TAG=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/tags" \
+              | jq -r '.[0].name // empty') || true
+          fi
+          if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
             echo "No upstream tag found; nothing to do."
             exit 0
           fi
-          echo "Upstream tag: $TAG"
+          echo "Upstream tag: ${TAG}"
           VERSION="${TAG#v}"
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install osc
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y osc
+
+      - name: Configure osc
+        shell: bash
+        env:
+          OBS_USER: ${{ secrets.OBS_USER }}
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.config/osc
+          cat > ~/.oscrc <<EOF
+          [general]
+          apiurl = https://api.opensuse.org
+
+          [https://api.opensuse.org]
+          user = ${OBS_USER}
+          pass = ${OBS_TOKEN}
+          credentials_mgr_class = osc.credentials.PlaintextConfigFileCredentialsManager
+          EOF
+          chmod 600 ~/.oscrc
+
+      - name: Check out OBS package
+        shell: bash
+        run: |
+          set -euo pipefail
+          osc co "${OBS_PROJECT}" "${OBS_PACKAGE}"
+
+      - name: Update _service file
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE_FILE="${OBS_PROJECT}/${OBS_PACKAGE}/_service"
+          TARBALL_URL="https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz"
+          FILENAME="${OBS_PACKAGE}-${VERSION}.tar.gz"
+          cat > "${SERVICE_FILE}" <<EOF
+          <services>
+            <service name="download_url">
+              <param name="url">${TARBALL_URL}</param>
+              <param name="filename">${FILENAME}</param>
+            </service>
+          </services>
+          EOF
+          echo "Written _service:"
+          cat "${SERVICE_FILE}"
+
+      - name: Commit _service to OBS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${OBS_PROJECT}/${OBS_PACKAGE}"
+          osc addremove
+          osc commit -m "Sync to upstream release ${TAG}"
 
       - name: Trigger OBS source service run
         shell: bash
@@ -42,11 +128,7 @@ jobs:
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${OBS_TOKEN:-}" ]; then
-            echo "OBS_TOKEN not set; cannot trigger service run"
-            exit 1
-          fi
-          echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
+          echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (tag: ${TAG})..."
           HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
             -H "Authorization: Token ${OBS_TOKEN}" \
             -X POST \
@@ -57,10 +139,9 @@ jobs:
             echo "ERROR: OBS service trigger failed with HTTP ${HTTP_STATUS}"
             exit 1
           fi
-          echo "OBS service run triggered successfully."
+          echo "OBS source service triggered successfully."
 
-      - name: Wait for OBS build result
-        continue-on-error: true
+      - name: Poll OBS build result
         shell: bash
         env:
           OBS_USER: ${{ secrets.OBS_USER }}
@@ -69,23 +150,23 @@ jobs:
           set -euo pipefail
           echo "Polling OBS build results for ${OBS_PROJECT}/${OBS_PACKAGE}..."
           for i in $(seq 1 30); do
-            sleep 10
-            RESULTS=$(curl -s \
+            sleep 15
+            RESULTS=$(curl -sf \
               -u "${OBS_USER}:${OBS_TOKEN}" \
               "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
               2>/dev/null || true)
-            if [ -n "$RESULTS" ]; then
-              echo "Poll $i: $RESULTS"
-              if echo "$RESULTS" | grep -qi 'state="failed"'; then
+            if [ -n "${RESULTS}" ]; then
+              echo "Poll ${i}: ${RESULTS}"
+              if echo "${RESULTS}" | grep -qi 'state="failed"'; then
                 echo "Build FAILED"
                 exit 1
               fi
-              if echo "$RESULTS" | grep -qi 'state="succeeded"'; then
+              if echo "${RESULTS}" | grep -qi 'state="succeeded"'; then
                 echo "Build SUCCEEDED"
                 exit 0
               fi
             else
-              echo "Poll $i: no response yet"
+              echo "Poll ${i}: no response yet"
             fi
           done
           echo "Build monitoring timed out; check OBS manually."
