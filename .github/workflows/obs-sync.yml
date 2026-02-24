@@ -20,7 +20,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq osc
+          sudo apt-get install -y jq
 
       - name: Determine TAG / VERSION
         id: tag
@@ -56,34 +56,14 @@ jobs:
             exit 1
           fi
 
-      - name: Configure osc credentials
+      - name: Update and commit _service to OBS
         shell: bash
         env:
           OBS_USER: ${{ secrets.OBS_USER }}
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
-          cat > "$HOME/.oscrc" << EOF
-          [general]
-          apiurl = https://api.opensuse.org
-
-          [https://api.opensuse.org]
-          user = ${OBS_USER}
-          credentials_mgr_class = osc.credentials.PlaintextConfigFileCredentialsManager
-          pass = ${OBS_TOKEN}
-          EOF
-          chmod 600 "$HOME/.oscrc"
-
-      - name: Checkout OBS package
-        shell: bash
-        run: |
           set -euo pipefail
-          osc co "${OBS_PROJECT}" "${OBS_PACKAGE}"
-
-      - name: Update _service file
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > "${OBS_PROJECT}/${OBS_PACKAGE}/_service" << EOF
+          cat > /tmp/_service << EOF
           <services>
             <service name="download_files">
               <param name="url">https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz</param>
@@ -91,14 +71,32 @@ jobs:
             </service>
           </services>
           EOF
-
-      - name: Commit _service to OBS
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${OBS_PROJECT}/${OBS_PACKAGE}"
-          osc add _service || true
-          osc commit -m "ci: update _service to upstream ${TAG}"
+          echo "Uploading _service to OBS..."
+          HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
+            -u "${OBS_USER}:${OBS_TOKEN}" \
+            -X PUT \
+            --data-binary @/tmp/_service \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
+          echo "PUT response (HTTP ${HTTP_STATUS}):"
+          cat /tmp/obs_put_resp.txt
+          if [ "${HTTP_STATUS}" != "200" ] && [ "${HTTP_STATUS}" != "201" ]; then
+            echo "ERROR: Failed to upload _service (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+          echo "Committing _service to OBS..."
+          COMMENT="ci: update _service to upstream ${TAG}"
+          ENCODED_COMMENT=$(printf '%s' "${COMMENT}" | python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read()))')
+          HTTP_STATUS=$(curl -s -o /tmp/obs_commit_resp.txt -w "%{http_code}" \
+            -u "${OBS_USER}:${OBS_TOKEN}" \
+            -X POST \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}?cmd=commit&comment=${ENCODED_COMMENT}")
+          echo "Commit response (HTTP ${HTTP_STATUS}):"
+          cat /tmp/obs_commit_resp.txt
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "ERROR: Failed to commit _service (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+          echo "OBS _service updated and committed successfully."
 
       - name: Trigger OBS source service run
         shell: bash
