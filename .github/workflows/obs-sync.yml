@@ -68,6 +68,7 @@ jobs:
 
           [https://api.opensuse.org]
           user = ${OBS_USER}
+          credentials_mgr_class = osc.credentials.PlaintextConfigFileCredentialsManager
           pass = ${OBS_TOKEN}
           EOF
           chmod 600 "$HOME/.oscrc"
