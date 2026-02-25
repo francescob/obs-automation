@@ -67,11 +67,16 @@ jobs:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
         run: |
           set -euo pipefail
+          touch /tmp/obs_service.xml
           HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
             -o /tmp/obs_service.xml -w "%{http_code}" \
             -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service") || true
           echo "Fetched _service (HTTP ${HTTP_STATUS})"
+          if [ "${HTTP_STATUS}" = "000" ]; then
+            echo "ERROR: Could not connect to OBS API (network/connection error)"
+            exit 1
+          fi
           if [ "${HTTP_STATUS}" != "200" ]; then
             echo "ERROR: Could not fetch _service file"
             cat /tmp/obs_service.xml
@@ -103,11 +108,16 @@ jobs:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
         run: |
           set -euo pipefail
+          touch /tmp/obs_spec.spec
           HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
             -o /tmp/obs_spec.spec -w "%{http_code}" \
             -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/${OBS_PACKAGE}.spec") || true
           echo "Fetched spec (HTTP ${HTTP_STATUS})"
+          if [ "${HTTP_STATUS}" = "000" ]; then
+            echo "ERROR: Could not connect to OBS API (network/connection error)"
+            exit 1
+          fi
           if [ "${HTTP_STATUS}" != "200" ]; then
             echo "ERROR: Could not fetch spec file"
             cat /tmp/obs_spec.spec
