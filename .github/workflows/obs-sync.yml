@@ -63,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           HTTP_STATUS=$(curl -s -o /tmp/obs_service.xml -w "%{http_code}" \
-            -H "Authorization: Token ${OBS_TOKEN}" \
+            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
           echo "Fetched _service (HTTP ${HTTP_STATUS})"
           if [ "${HTTP_STATUS}" != "200" ]; then
@@ -78,7 +78,7 @@ jobs:
           echo "Updated _service file:"
           cat /tmp/obs_service.xml
           HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
-            -H "Authorization: Token ${OBS_TOKEN}" \
+            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
             -X PUT \
             -T /tmp/obs_service.xml \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service?comment=Bump+to+${TAG}")
