@@ -56,47 +56,6 @@ jobs:
             exit 1
           fi
 
-      - name: Update and commit _service to OBS
-        shell: bash
-        env:
-          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
-        run: |
-          set -euo pipefail
-          cat > /tmp/_service << EOF
-          <services>
-            <service name="download_files">
-              <param name="url">https://github.com/${UPSTREAM_REPO}/archive/refs/tags/${TAG}.tar.gz</param>
-              <param name="filename">${OBS_PACKAGE}-${VERSION}.tar.gz</param>
-            </service>
-          </services>
-          EOF
-          echo "Uploading _service to OBS..."
-          HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
-            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
-            -X PUT \
-            --data-binary @/tmp/_service \
-            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
-          echo "PUT response (HTTP ${HTTP_STATUS}):"
-          cat /tmp/obs_put_resp.txt
-          if [ "${HTTP_STATUS}" != "200" ] && [ "${HTTP_STATUS}" != "201" ]; then
-            echo "ERROR: Failed to upload _service (HTTP ${HTTP_STATUS})"
-            exit 1
-          fi
-          echo "Committing _service to OBS..."
-          COMMENT="ci: update _service to upstream ${TAG}"
-          ENCODED_COMMENT=$(printf '%s' "${COMMENT}" | python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read()))')
-          HTTP_STATUS=$(curl -s -o /tmp/obs_commit_resp.txt -w "%{http_code}" \
-            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
-            -X POST \
-            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}?cmd=commit&comment=${ENCODED_COMMENT}")
-          echo "Commit response (HTTP ${HTTP_STATUS}):"
-          cat /tmp/obs_commit_resp.txt
-          if [ "${HTTP_STATUS}" != "200" ]; then
-            echo "ERROR: Failed to commit _service (HTTP ${HTTP_STATUS})"
-            exit 1
-          fi
-          echo "OBS _service updated and committed successfully."
-
       - name: Trigger OBS source service run
         shell: bash
         env:
@@ -105,7 +64,7 @@ jobs:
           set -euo pipefail
           echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
           HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
-            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
+            -H "Authorization: Token ${OBS_TOKEN}" \
             -X POST \
             "https://api.opensuse.org/trigger/runservice?project=${OBS_PROJECT}&package=${OBS_PACKAGE}")
           echo "OBS response (HTTP ${HTTP_STATUS}):"
@@ -126,7 +85,7 @@ jobs:
           for i in $(seq 1 30); do
             sleep 10
             RESULTS=$(curl -s \
-              -u "${OBS_USERNAME}:${OBS_TOKEN}" \
+              -H "Authorization: Token ${OBS_TOKEN}" \
               "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
               2>/dev/null || true)
             if [ -n "$RESULTS" ]; then
