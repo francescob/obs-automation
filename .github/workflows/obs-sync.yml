@@ -77,15 +77,12 @@ jobs:
 
       - name: Wait for OBS build result
         shell: bash
-        env:
-          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
         run: |
           set -euo pipefail
           echo "Polling OBS build results for ${OBS_PROJECT}/${OBS_PACKAGE}..."
           for i in $(seq 1 30); do
             sleep 10
             RESULTS=$(curl -s \
-              -H "Authorization: Token ${OBS_TOKEN}" \
               "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
               2>/dev/null || true)
             if [ -n "$RESULTS" ]; then
