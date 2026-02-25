@@ -97,6 +97,39 @@ jobs:
           fi
           echo "OBS _service updated to ${TAG}."
 
+      - name: Update OBS spec Version
+        shell: bash
+        env:
+          OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+            -o /tmp/obs_spec.spec -w "%{http_code}" \
+            -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/${OBS_PACKAGE}.spec")
+          echo "Fetched spec (HTTP ${HTTP_STATUS})"
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "ERROR: Could not fetch spec file"
+            cat /tmp/obs_spec.spec
+            exit 1
+          fi
+          sed -i -e "s|^Version:.*|Version:        ${VERSION}|" /tmp/obs_spec.spec
+          echo "Updated spec file Version line:"
+          grep "^Version:" /tmp/obs_spec.spec
+          HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+            -o /tmp/obs_spec_put_resp.txt -w "%{http_code}" \
+            -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
+            -X PUT \
+            -T /tmp/obs_spec.spec \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/${OBS_PACKAGE}.spec?comment=Bump+Version+to+${VERSION}")
+          echo "PUT spec (HTTP ${HTTP_STATUS}):"
+          cat /tmp/obs_spec_put_resp.txt
+          if [ "${HTTP_STATUS}" != "200" ] && [ "${HTTP_STATUS}" != "201" ]; then
+            echo "ERROR: Failed to update OBS spec file"
+            exit 1
+          fi
+          echo "OBS spec updated to ${VERSION}."
+
       - name: Trigger OBS source service run
         shell: bash
         env:
