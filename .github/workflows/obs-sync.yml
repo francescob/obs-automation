@@ -56,6 +56,40 @@ jobs:
             exit 1
           fi
 
+      - name: Update OBS _service revision
+        shell: bash
+        env:
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          HTTP_STATUS=$(curl -s -o /tmp/obs_service.xml -w "%{http_code}" \
+            -H "Authorization: Token ${OBS_TOKEN}" \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
+          echo "Fetched _service (HTTP ${HTTP_STATUS})"
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "ERROR: Could not fetch _service file"
+            cat /tmp/obs_service.xml
+            exit 1
+          fi
+          sed -i \
+            -e "s|<param name=\"revision\">[^<]*</param>|<param name=\"revision\">${TAG}</param>|g" \
+            -e "s|<param name=\"version\">[^<]*</param>|<param name=\"version\">${VERSION}</param>|g" \
+            /tmp/obs_service.xml
+          echo "Updated _service file:"
+          cat /tmp/obs_service.xml
+          HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
+            -H "Authorization: Token ${OBS_TOKEN}" \
+            -X PUT \
+            -T /tmp/obs_service.xml \
+            "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service?comment=Bump+to+${TAG}")
+          echo "PUT _service (HTTP ${HTTP_STATUS}):"
+          cat /tmp/obs_put_resp.txt
+          if [ "${HTTP_STATUS}" != "200" ] && [ "${HTTP_STATUS}" != "201" ]; then
+            echo "ERROR: Failed to update OBS _service file"
+            exit 1
+          fi
+          echo "OBS _service updated to ${TAG}."
+
       - name: Trigger OBS source service run
         shell: bash
         env:
