@@ -12,6 +12,7 @@ env:
   OBS_PROJECT: home:ilFrance
   OBS_PACKAGE: plasmazones
   OBS_REPO: openSUSE_Tumbleweed
+  OBS_USERNAME: ilFrance
 
 jobs:
   sync:
@@ -71,7 +72,7 @@ jobs:
           EOF
           echo "Uploading _service to OBS..."
           HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
-            -H "Authorization: Token ${OBS_TOKEN}" \
+            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
             -X PUT \
             --data-binary @/tmp/_service \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
@@ -85,7 +86,7 @@ jobs:
           COMMENT="ci: update _service to upstream ${TAG}"
           ENCODED_COMMENT=$(printf '%s' "${COMMENT}" | python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read()))')
           HTTP_STATUS=$(curl -s -o /tmp/obs_commit_resp.txt -w "%{http_code}" \
-            -H "Authorization: Token ${OBS_TOKEN}" \
+            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
             -X POST \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}?cmd=commit&comment=${ENCODED_COMMENT}")
           echo "Commit response (HTTP ${HTTP_STATUS}):"
@@ -104,7 +105,7 @@ jobs:
           set -euo pipefail
           echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
           HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
-            -H "Authorization: Token ${OBS_TOKEN}" \
+            -u "${OBS_USERNAME}:${OBS_TOKEN}" \
             -X POST \
             "https://api.opensuse.org/trigger/runservice?project=${OBS_PROJECT}&package=${OBS_PACKAGE}")
           echo "OBS response (HTTP ${HTTP_STATUS}):"
@@ -125,7 +126,7 @@ jobs:
           for i in $(seq 1 30); do
             sleep 10
             RESULTS=$(curl -s \
-              -H "Authorization: Token ${OBS_TOKEN}" \
+              -u "${OBS_USERNAME}:${OBS_TOKEN}" \
               "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
               2>/dev/null || true)
             if [ -n "$RESULTS" ]; then
