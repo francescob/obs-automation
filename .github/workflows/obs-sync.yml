@@ -67,7 +67,8 @@ jobs:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
         run: |
           set -euo pipefail
-          HTTP_STATUS=$(curl -s -o /tmp/obs_service.xml -w "%{http_code}" \
+          HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+            -o /tmp/obs_service.xml -w "%{http_code}" \
             -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
             "https://api.opensuse.org/source/${OBS_PROJECT}/${OBS_PACKAGE}/_service")
           echo "Fetched _service (HTTP ${HTTP_STATUS})"
@@ -82,7 +83,8 @@ jobs:
             /tmp/obs_service.xml
           echo "Updated _service file:"
           cat /tmp/obs_service.xml
-          HTTP_STATUS=$(curl -s -o /tmp/obs_put_resp.txt -w "%{http_code}" \
+          HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+            -o /tmp/obs_put_resp.txt -w "%{http_code}" \
             -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
             -X PUT \
             -T /tmp/obs_service.xml \
@@ -102,7 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Triggering OBS source service for ${OBS_PROJECT}/${OBS_PACKAGE} (upstream: ${TAG:-unknown})..."
-          HTTP_STATUS=$(curl -s -o /tmp/obs_resp.txt -w "%{http_code}" \
+          HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+            -o /tmp/obs_resp.txt -w "%{http_code}" \
             -H "Authorization: Token ${OBS_TOKEN}" \
             -X POST \
             "https://api.opensuse.org/trigger/runservice?project=${OBS_PROJECT}&package=${OBS_PACKAGE}")
@@ -121,7 +124,7 @@ jobs:
           echo "Polling OBS build results for ${OBS_PROJECT}/${OBS_PACKAGE}..."
           for i in $(seq 1 30); do
             sleep 10
-            RESULTS=$(curl -s \
+            RESULTS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
               "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
               2>/dev/null || true)
             if [ -n "$RESULTS" ]; then
