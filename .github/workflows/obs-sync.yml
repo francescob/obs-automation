@@ -162,16 +162,24 @@ jobs:
 
       - name: Wait for OBS build result
         shell: bash
+        env:
+          OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
         run: |
           set -euo pipefail
           echo "Polling OBS build results for ${OBS_PROJECT}/${OBS_PACKAGE}..."
           for i in $(seq 1 30); do
             sleep 10
-            RESULTS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
-              "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}" \
-              2>/dev/null || true)
+            HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
+              -o /tmp/obs_build_result.xml -w "%{http_code}" \
+              -u "${OBS_USERNAME}:${OBS_PASSWORD}" \
+              "https://api.opensuse.org/build/${OBS_PROJECT}/_result?package=${OBS_PACKAGE}&repository=${OBS_REPO}") || true
+            RESULTS=$(cat /tmp/obs_build_result.xml 2>/dev/null || true)
+            if [ "${HTTP_STATUS}" = "401" ]; then
+              echo "ERROR: Authentication failed (HTTP 401). Check OBS_PASSWORD secret."
+              exit 1
+            fi
             if [ -n "$RESULTS" ]; then
-              echo "Poll $i: $RESULTS"
+              echo "Poll $i (HTTP ${HTTP_STATUS}): $RESULTS"
               if echo "$RESULTS" | grep -qi 'state="failed"'; then
                 echo "Build FAILED"
                 exit 1
