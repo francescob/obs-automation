@@ -211,19 +211,18 @@ jobs:
               continue
             fi
             if [ -n "$RESULTS" ]; then
-              tr "'" '"' < /tmp/obs_build_result.xml > /tmp/obs_build_result_normalized.xml
               SUMMARY=$(echo "$RESULTS" | tr '\n' ' ' | sed 's/  */ /g')
               echo "Poll $i (HTTP ${HTTP_STATUS}): $SUMMARY"
-              if grep -Eqi 'state *= *"failed"|code *= *"(failed|broken|unresolvable)"' /tmp/obs_build_result_normalized.xml; then
+              if grep -Eqi "state=['\"]failed['\"]|code=['\"](failed|broken|unresolvable)['\"]" /tmp/obs_build_result.xml; then
                 echo "Build FAILED in OBS"
                 exit 1
               fi
-              if grep -qi 'dirty *= *"true"' /tmp/obs_build_result_normalized.xml; then
+              if grep -Eqi "dirty=['\"]true['\"]" /tmp/obs_build_result.xml; then
                 continue
               fi
-              TOTAL_RESULTS=$(grep -o '<result ' /tmp/obs_build_result_normalized.xml | wc -l | tr -d ' ')
-              SUCCESS_RESULTS=$(grep -Eo 'code *= *"succeeded"' /tmp/obs_build_result_normalized.xml | wc -l | tr -d ' ')
-              if [ "${TOTAL_RESULTS}" -gt 0 ] && [ "${SUCCESS_RESULTS}" -eq "${TOTAL_RESULTS}" ]; then
+              TOTAL_CODE_RESULTS=$(grep -Eo "code=['\"][^'\"]+['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
+              SUCCESS_RESULTS=$(grep -Eo "code=['\"]succeeded['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
+              if [ "${TOTAL_CODE_RESULTS}" -gt 0 ] && [ "${SUCCESS_RESULTS}" -eq "${TOTAL_CODE_RESULTS}" ]; then
                 echo "Build SUCCEEDED"
                 exit 0
               fi
