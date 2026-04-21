@@ -62,6 +62,7 @@ jobs:
           fi
 
       - name: Update OBS _service revision
+        id: service_update
         shell: bash
         env:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
@@ -82,6 +83,13 @@ jobs:
             cat /tmp/obs_service.xml
             exit 1
           fi
+          CURRENT_REVISION=$(sed -n 's|.*<param name="revision">\([^<]*\)</param>.*|\1|p' /tmp/obs_service.xml | head -n1 || true)
+          CURRENT_VERSION=$(sed -n 's|.*<param name="version">\([^<]*\)</param>.*|\1|p' /tmp/obs_service.xml | head -n1 || true)
+          if [ "${CURRENT_REVISION}" = "${TAG}" ] && [ "${CURRENT_VERSION}" = "${VERSION}" ]; then
+            echo "OBS _service already up to date (${TAG}/${VERSION}), skipping PUT."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           sed -i \
             -e "s|<param name=\"revision\">[^<]*</param>|<param name=\"revision\">${TAG}</param>|g" \
             -e "s|<param name=\"version\">[^<]*</param>|<param name=\"version\">${VERSION}</param>|g" \
@@ -100,9 +108,11 @@ jobs:
             echo "ERROR: Failed to update OBS _service file"
             exit 1
           fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "OBS _service updated to ${TAG}."
 
       - name: Update OBS spec Version
+        id: spec_update
         shell: bash
         env:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
@@ -123,6 +133,14 @@ jobs:
             cat /tmp/obs_spec.spec
             exit 1
           fi
+          CURRENT_SPEC_VERSION=$(awk -F ':' '/^Version:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' /tmp/obs_spec.spec || true)
+          CURRENT_SPEC_VERSION_NORM=$(printf '%s' "${CURRENT_SPEC_VERSION}" | tr -d '[:space:]')
+          VERSION_NORM=$(printf '%s' "${VERSION}" | tr -d '[:space:]')
+          if [ "${CURRENT_SPEC_VERSION_NORM}" = "${VERSION_NORM}" ]; then
+            echo "OBS spec already up to date (${VERSION}), skipping PUT."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           sed -i -e "s|^Version:.*|Version:        ${VERSION}|" /tmp/obs_spec.spec
           echo "Updated spec file Version line:"
           grep "^Version:" /tmp/obs_spec.spec
@@ -138,9 +156,11 @@ jobs:
             echo "ERROR: Failed to update OBS spec file"
             exit 1
           fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "OBS spec updated to ${VERSION}."
 
       - name: Trigger OBS source service run
+        if: steps.service_update.outputs.changed == 'true' || steps.spec_update.outputs.changed == 'true'
         shell: bash
         env:
           OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
@@ -160,7 +180,15 @@ jobs:
           fi
           echo "OBS service run triggered successfully."
 
+      - name: Skip OBS trigger (already synced)
+        if: steps.service_update.outputs.changed != 'true' && steps.spec_update.outputs.changed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "No upstream changes detected in OBS files; skipping trigger and build wait."
+
       - name: Wait for OBS build result
+        if: steps.service_update.outputs.changed == 'true' || steps.spec_update.outputs.changed == 'true'
         shell: bash
         env:
           OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
@@ -178,13 +206,23 @@ jobs:
               echo "ERROR: Authentication failed (HTTP 401). Check OBS_PASSWORD secret."
               exit 1
             fi
+            if [ "${HTTP_STATUS}" != "200" ]; then
+              echo "Poll $i (HTTP ${HTTP_STATUS}): temporary OBS API issue, retrying..."
+              continue
+            fi
             if [ -n "$RESULTS" ]; then
-              echo "Poll $i (HTTP ${HTTP_STATUS}): $RESULTS"
-              if echo "$RESULTS" | grep -qi 'state="failed"'; then
-                echo "Build FAILED"
+              SUMMARY=$(echo "$RESULTS" | tr '\n' ' ' | sed 's/  */ /g')
+              echo "Poll $i (HTTP ${HTTP_STATUS}): $SUMMARY"
+              if grep -Eqi "state=['\"]failed['\"]|code=['\"](failed|broken|unresolvable)['\"]" /tmp/obs_build_result.xml; then
+                echo "Build FAILED in OBS"
                 exit 1
               fi
-              if echo "$RESULTS" | grep -qi 'state="succeeded"'; then
+              if grep -Eqi "dirty=['\"]true['\"]" /tmp/obs_build_result.xml; then
+                continue
+              fi
+              TOTAL_CODE_RESULTS=$(grep -Eo "code=['\"][^'\"]+['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
+              SUCCESS_RESULTS=$(grep -Eo "code=['\"]succeeded['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
+              if [ "${TOTAL_CODE_RESULTS}" -gt 0 ] && [ "${SUCCESS_RESULTS}" -eq "${TOTAL_CODE_RESULTS}" ]; then
                 echo "Build SUCCEEDED"
                 exit 0
               fi
