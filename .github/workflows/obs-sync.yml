@@ -90,10 +90,22 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if ! grep -q '<param name="revision">' /tmp/obs_service.xml || ! grep -q '<param name="version">' /tmp/obs_service.xml; then
+            echo "OBS _service has no revision/version params; skipping _service update."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ORIGINAL_SERVICE_SHA=$(sha256sum /tmp/obs_service.xml | awk '{print $1}')
           sed -i \
             -e "s|<param name=\"revision\">[^<]*</param>|<param name=\"revision\">${TAG}</param>|g" \
             -e "s|<param name=\"version\">[^<]*</param>|<param name=\"version\">${VERSION}</param>|g" \
             /tmp/obs_service.xml
+          UPDATED_SERVICE_SHA=$(sha256sum /tmp/obs_service.xml | awk '{print $1}')
+          if [ "${ORIGINAL_SERVICE_SHA}" = "${UPDATED_SERVICE_SHA}" ]; then
+            echo "OBS _service revision/version unchanged after substitution, skipping PUT."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "Updated _service file:"
           cat /tmp/obs_service.xml
           HTTP_STATUS=$(curl -s --ipv4 --connect-timeout 30 --max-time 60 \
@@ -220,8 +232,8 @@ jobs:
               if grep -Eqi "dirty=['\"]true['\"]" /tmp/obs_build_result.xml; then
                 continue
               fi
-              TOTAL_CODE_RESULTS=$(grep -Eo "code=['\"][^'\"]+['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
-              SUCCESS_RESULTS=$(grep -Eo "code=['\"]succeeded['\"]" /tmp/obs_build_result.xml | wc -l | tr -d ' ')
+              TOTAL_CODE_RESULTS=$( (grep -Eo "code=['\"][^'\"]+['\"]" /tmp/obs_build_result.xml || true) | wc -l | tr -d ' ')
+              SUCCESS_RESULTS=$( (grep -Eo "code=['\"]succeeded['\"]" /tmp/obs_build_result.xml || true) | wc -l | tr -d ' ')
               if [ "${TOTAL_CODE_RESULTS}" -gt 0 ] && [ "${SUCCESS_RESULTS}" -eq "${TOTAL_CODE_RESULTS}" ]; then
                 echo "Build SUCCEEDED"
                 exit 0
